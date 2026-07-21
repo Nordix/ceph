@@ -324,21 +324,24 @@ void DaemonServer::ms_handle_accept(Connection* con)
 
 bool DaemonServer::ms_handle_reset(Connection *con)
 {
+  std::lock_guard l(lock);
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_OSD) {
     auto priv = con->get_priv();
     auto session = static_cast<MgrSession*>(priv.get());
-    if (!session) {
-      return false;
+    if (session) {
+      dout(10) << "unregistering osd." << session->osd_id
+	       << "  session " << session << " con " << con << dendl;
+      osd_cons[session->osd_id].erase(con);
     }
-    std::lock_guard l(lock);
-    dout(10) << "unregistering osd." << session->osd_id
-	     << "  session " << session << " con " << con << dendl;
-    osd_cons[session->osd_id].erase(con);
+  }
 
-    auto iter = daemon_connections.find(con);
-    if (iter != daemon_connections.end()) {
-      daemon_connections.erase(iter);
-    }
+  // Connections are inserted into daemon_connections for *any* non-client
+  // daemon (mon, mds, osd, ...) in handle_open(), so the ConnectionRef must
+  // be released here for all peer types, not just OSDs.  Otherwise every
+  // ungracefully reset non-OSD daemon connection leaks its AsyncConnection.
+  auto iter = daemon_connections.find(con);
+  if (iter != daemon_connections.end()) {
+    daemon_connections.erase(iter);
   }
   return false;
 }

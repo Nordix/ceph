@@ -60,6 +60,25 @@ public:
   virtual void foreach(
     std::function<void(uint64_t offset, uint64_t length)> notify) = 0;
 
+  /*
+   * Weakly-consistent counterpart to foreach() intended for
+   * statistical/best-effort consumers such as fragmentation scoring.
+   *
+   * Unlike foreach(), which may hold the allocator lock for the entire walk
+   * (and thus stall the write/allocation path on highly fragmented devices),
+   * implementations are free to visit the free extents in bounded batches,
+   * holding the lock only for one batch at a time. As a result the union of
+   * batches is an APPROXIMATION of the free space: extents concurrently
+   * allocated/released during the walk may be missed or double-observed.
+   *
+   * The base implementation simply delegates to foreach(), so allocators that
+   * do not override it retain exact, fully-consistent behaviour.
+   */
+  virtual void foreach_interruptible(
+    std::function<void(uint64_t offset, uint64_t length)> notify) {
+    foreach(notify);
+  }
+
   virtual void init_add_free(uint64_t offset, uint64_t length) = 0;
   virtual void init_rm_free(uint64_t offset, uint64_t length) = 0;
 

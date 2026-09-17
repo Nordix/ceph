@@ -134,7 +134,16 @@ double Allocator::get_fragmentation_score()
     score_sum += get_score(len);
     sum += len;
   };
-  foreach(iterated_allocation);
+  // Use the weakly-consistent, batched walk instead of foreach(). foreach()
+  // may hold the allocator lock for the entire enumeration of free extents,
+  // and that same lock is taken on the write/allocation path. On highly
+  // fragmented devices the walk can exceed a second and stall writes (observed
+  // via the periodic bluestore_fragmentation_check_period check in
+  // MempoolThread). foreach_interruptible() lets allocators release the lock
+  // between batches; a best-effort approximation is acceptable for a
+  // statistical fragmentation score. Allocators that do not override it fall
+  // back to foreach() and keep exact behaviour.
+  foreach_interruptible(iterated_allocation);
 
   double ideal = get_score(sum);
   double terrible = (sum / block_size) * get_score(block_size);

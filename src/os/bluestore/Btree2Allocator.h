@@ -219,6 +219,18 @@ protected:
 
   void _dump(bool full = true) const;
   void _foreach(std::function<void(uint64_t offset, uint64_t length)>);
+  /*
+   * Weakly-consistent, batched variant of _foreach(). Walks range_tree in
+   * bounded batches, taking the allocator lock only for one batch at a time
+   * and resuming by offset via range_tree.lower_bound() between batches. This
+   * bounds the per-batch lock hold so a full walk (e.g. for fragmentation
+   * scoring) does not stall the allocation path on a highly fragmented device.
+   * The result is an approximation: extents concurrently allocated/released
+   * across a batch boundary may be missed or double-counted. notify() runs
+   * outside the lock.
+   */
+  void _foreach_interruptible(
+    std::function<void(uint64_t offset, uint64_t length)> notify);
 
   int64_t _allocate(
     uint64_t want,

@@ -178,6 +178,49 @@ void Btree2Allocator::_foreach(
   }
 }
 
+void Btree2Allocator::_foreach_interruptible(
+  std::function<void(uint64_t offset, uint64_t length)> notify)
+{
+  // Number of range entries visited per lock acquisition. The lock is held
+  // only while copying one batch out of range_tree; notify() runs unlocked.
+  static constexpr size_t batch_size = 1024;
+  // A batch collected under the lock; (start, end) pairs, notified afterwards.
+  std::vector<std::pair<uint64_t, uint64_t>> batch;
+  batch.reserve(batch_size);
+  // Resume cursor: the offset just past the last entry already visited.
+  // range_tree is a btree_map keyed by start offset, and free segments do not
+  // overlap, so lower_bound(cursor) uniquely locates where to resume.
+  uint64_t cursor = 0;
+  bool done = false;
+  while (!done) {
+    batch.clear();
+    {
+      std::lock_guard l(lock);
+      auto it = range_tree.lower_bound(cursor);
+      for (size_t n = 0; n < batch_size && it != range_tree.end(); ++n, ++it) {
+        batch.emplace_back(it->first, it->second);
+      }
+      if (it == range_tree.end()) {
+        done = true;
+      } else {
+        // Resume just past the last entry we copied; non-overlapping,
+        // offset-ordered segments guarantee forward progress and no repeats
+        // within a stable tree.
+        cursor = batch.back().second;
+      }
+    }
+    for (const auto& [start, end] : batch) {
+      notify(start, end - start);
+    }
+  }
+  // The opportunistic cache is small and bounded; walk it exactly in one
+  // final locked step rather than batching it.
+  if (cache) {
+    std::lock_guard l(lock);
+    cache->foreach(notify);
+  }
+}
+
 int64_t Btree2Allocator::_allocate(
   uint64_t want,
   uint64_t unit,

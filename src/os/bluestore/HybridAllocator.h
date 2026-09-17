@@ -54,6 +54,20 @@ public:
       bmap_alloc->foreach(notify);
     }
   }
+  // Weakly-consistent walk used by get_fragmentation_score(). Drives the
+  // primary allocator through its batched _foreach_interruptible() so the
+  // allocator lock is released between batches instead of being held for the
+  // whole enumeration (which stalls writes on highly fragmented devices). The
+  // bitmap spillover allocator only holds extents under range-count-cap
+  // spillover and is typically empty/small, so its exact foreach() is cheap
+  // and left as-is.
+  void foreach_interruptible(
+      std::function<void(uint64_t, uint64_t)> notify) override {
+    PrimaryAllocator::_foreach_interruptible(notify);
+    if (bmap_alloc) {
+      bmap_alloc->foreach(notify);
+    }
+  }
   void init_rm_free(uint64_t offset, uint64_t length) override;
   void shutdown() override {
     std::lock_guard l(PrimaryAllocator::get_lock());

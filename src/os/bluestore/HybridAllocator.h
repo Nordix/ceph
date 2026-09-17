@@ -54,6 +54,18 @@ public:
       bmap_alloc->foreach(notify);
     }
   }
+  // Weakly-consistent walk used by get_fragmentation_score(). Drives the
+  // primary allocator through its batched _foreach_interruptible() so the
+  // allocator lock is released between batches instead of being held for the
+  // whole enumeration (which stalls writes on highly fragmented devices).
+  void foreach_interruptible(
+      std::function<void(uint64_t, uint64_t)> notify) override {
+    PrimaryAllocator::_foreach_interruptible(notify);
+    std::lock_guard l(PrimaryAllocator::get_lock());
+    if (bmap_alloc) {
+      bmap_alloc->foreach(notify);
+    }
+  }
   void init_rm_free(uint64_t offset, uint64_t length) override;
   void shutdown() override {
     std::lock_guard l(PrimaryAllocator::get_lock());

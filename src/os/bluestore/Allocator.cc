@@ -236,7 +236,7 @@ double Allocator::get_fragmentation_score()
   static const size_t small_chunk_p2 = 20; // 1MB
   static const size_t huge_chunk_p2 = 27; // 128MB
   // for chunks 1MB - 128MB penalty coeffs are linearly weighted 1.2 (at small) ... 1 (at huge)
-  static std::vector<double> scales{1};
+  static thread_local std::vector<double> scales{1};
   double score_sum = 0;
   size_t sum = 0;
 
@@ -268,7 +268,16 @@ double Allocator::get_fragmentation_score()
     score_sum += get_score(len);
     sum += len;
   };
-  foreach(iterated_allocation);
+  // Use the weakly-consistent, batched walk instead of foreach(). foreach()
+  // may hold the allocator lock for the entire enumeration of free extents,
+  // and that same lock is taken on the write/allocation path. On highly
+  // fragmented devices the walk can exceed a second and stall writes (observed
+  // via the periodic bluestore_fragmentation_check_period check in
+  // MempoolThread). foreach_interruptible() lets allocators release the lock
+  // between batches; a best-effort approximation is acceptable for a
+  // statistical fragmentation score. Allocators that do not override it fall
+  // back to foreach() and keep exact behaviour.
+  foreach_interruptible(iterated_allocation);
 
   double ideal = get_score(sum);
   double terrible = (sum / block_size) * get_score(block_size);

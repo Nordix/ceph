@@ -478,6 +478,47 @@ void AvlAllocator::_foreach(
   }
 }
 
+void AvlAllocator::_foreach_interruptible(
+  std::function<void(uint64_t offset, uint64_t length)> notify)
+{
+  // Number of range segments visited per lock acquisition. The lock is held
+  // only while copying one batch out of range_tree; notify() runs unlocked.
+  static constexpr size_t batch_size = 1024;
+  // A batch collected under the lock; (start, end) pairs, notified afterwards.
+  std::vector<std::pair<uint64_t, uint64_t>> batch;
+  batch.reserve(batch_size);
+  // Resume cursor: the offset just past the last segment already visited.
+  // Segments are keyed/ordered by offset, and no two free segments overlap,
+  // so "first segment with end > cursor" uniquely identifies where to resume.
+  uint64_t cursor = 0;
+  bool done = false;
+  while (!done) {
+    batch.clear();
+    {
+      std::lock_guard l(lock);
+      // range_tree uses before_t (lhs.end <= rhs.start) as its comparator, so
+      // lower_bound() with a probe positioned at 'cursor' returns the first
+      // segment whose end > cursor, i.e. the first not-yet-visited segment.
+      range_seg_t probe{cursor, cursor};
+      auto it = range_tree.lower_bound(probe);
+      for (size_t n = 0; n < batch_size && it != range_tree.end(); ++n, ++it) {
+        batch.emplace_back(it->start, it->end);
+      }
+      if (it == range_tree.end()) {
+        done = true;
+      } else {
+        // Resume just past the last segment we copied. Because segments do not
+        // overlap and are offset-ordered, advancing the cursor to this end
+        // guarantees forward progress and no repeats within a stable tree.
+        cursor = batch.back().second;
+      }
+    }
+    for (const auto& [start, end] : batch) {
+      notify(start, end - start);
+    }
+  }
+}
+
 void AvlAllocator::init_add_free(uint64_t offset, uint64_t length)
 {
   ldout(cct, 10) << __func__ << std::hex

@@ -5,6 +5,10 @@
  * Author: Ramesh Chander, Ramesh.Chander@sandisk.com
  */
 #include <iostream>
+#include <atomic>
+#include <barrier>
+#include <cmath>
+#include <thread>
 #include <boost/scoped_ptr.hpp>
 #include <gtest/gtest.h>
 
@@ -13,6 +17,7 @@
 #include "include/stringify.h"
 #include "include/Context.h"
 #include "os/bluestore/Allocator.h"
+#include "os/bluestore/HybridAllocator.h"
 
 using namespace std;
 
@@ -335,6 +340,79 @@ TEST_P(AllocTest, test_alloc_fragmentation)
   // Hence leaving just two 
   // digits after decimal point due to this.
   EXPECT_EQ(0u, uint64_t(alloc->get_fragmentation() * 100));
+}
+
+TEST_P(AllocTest, test_foreach_interruptible_batched)
+{
+  if (string(GetParam()) != "hybrid" && string(GetParam()) != "hybrid_btree2") {
+    GTEST_SKIP();
+  }
+
+  const uint64_t alloc_unit = 4096;
+  const uint64_t extent_count = 2300;
+  init_alloc(extent_count * 2 * alloc_unit, alloc_unit);
+  for (uint64_t index = 0; index < extent_count; ++index) {
+    alloc->init_add_free(index * 2 * alloc_unit, alloc_unit);
+  }
+
+  vector<pair<uint64_t, uint64_t>> expected;
+  vector<pair<uint64_t, uint64_t>> actual;
+  alloc->foreach([&](uint64_t offset, uint64_t length) {
+    expected.emplace_back(offset, length);
+  });
+  alloc->foreach_interruptible([&](uint64_t offset, uint64_t length) {
+    EXPECT_EQ(extent_count * alloc_unit, alloc->get_free());
+    actual.emplace_back(offset, length);
+  });
+
+  EXPECT_EQ(extent_count, actual.size());
+  EXPECT_EQ(expected, actual);
+}
+
+TEST_P(AllocTest, test_fragmentation_score_concurrent_spillover)
+{
+  const string allocator_type = GetParam();
+  if (allocator_type != "hybrid" && allocator_type != "hybrid_btree2") {
+    GTEST_SKIP();
+  }
+
+  const uint64_t alloc_unit = 4096;
+  const uint64_t extent_count = 500;
+  const uint64_t capacity = (extent_count * 2 + 16) * alloc_unit;
+  if (allocator_type == "hybrid") {
+    alloc.reset(new HybridAvlAllocator(g_ceph_context, capacity, alloc_unit,
+                                      1024, "concurrent-spillover"));
+  } else {
+    alloc.reset(new HybridBtree2Allocator(g_ceph_context, capacity, alloc_unit,
+                                         1024, 1.0, "concurrent-spillover"));
+  }
+  alloc->init_add_free(0, 8 * alloc_unit);
+
+  std::barrier start(3);
+  std::atomic<bool> valid_scores{true};
+  auto score = [&] {
+    start.arrive_and_wait();
+    for (unsigned index = 0; index < extent_count; ++index) {
+      if (!std::isfinite(alloc->get_fragmentation_score())) {
+        valid_scores = false;
+      }
+    }
+  };
+  std::thread first_reader(score);
+  std::thread second_reader(score);
+  start.arrive_and_wait();
+  for (uint64_t index = 0; index < extent_count; ++index) {
+    alloc->init_add_free((index * 2 + 16) * alloc_unit, alloc_unit);
+    PExtentVector extents;
+    EXPECT_EQ(alloc_unit, alloc->allocate(alloc_unit, alloc_unit, 0, 0, &extents));
+    alloc->release(extents);
+  }
+  first_reader.join();
+  second_reader.join();
+
+  EXPECT_TRUE(valid_scores);
+  EXPECT_EQ((extent_count + 8) * alloc_unit, alloc->get_free());
+  alloc->shutdown();
 }
 
 TEST_P(AllocTest, test_fragmentation_score_0)
